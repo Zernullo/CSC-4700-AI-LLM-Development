@@ -1,0 +1,174 @@
+Purpose of this HW
+A word prediction program
+
+What is an n-gram?
+is a contiguous sequence of n items from given sample of text or speech.
+For example a sequence of two words like "please turn" is called a 2-gram, while a sequence of three words like "please turn your" is a 3-gram
+N-grams are widely used in natural language processing (NLP) tasks to analyze text data
+```
+Take this sentence:
+"the whale is white"
+Break it into words:
+the | whale | is | white
+```
+It take that sentence and uses it to predicate the next word
+For example:
+1-gram (Unigram) looks at the word:
+the -> ?
+whale -> ?
+predicating the next word is hard of you only have 1-gram
+
+2-gram (Bigram) looks at two words at a time
+(the → whale)
+(whale → is)
+(is → white)
+When I see the, what word usually comes next?
+
+3-gram (Trigram) looks at three words at a time
+(the whale → is)
+(whale is → white)
+When I see the whale, what word usually comes next?
+
+First Step
+First Step of the program we need to read the text file.
+n-gram will not work if we dont have the text file.
+First open the file then read (r) the file
+```
+with open("moby_dick.txt", "r", encoding="utf-8") as file:
+    text = file.read()
+```
+- open(...) → opens the file
+- "r" → read mode
+- encoding="utf-8" → avoids weird character bugs
+- file.read() → reads everything into a string
+- text → now holds the entire book
+
+Second Step
+We will need to tokenize the text bc currently it is a string and n-gram will not work in string
+What tozenization mean is to split the string to individual words/text
+```
+Call me Ishmael. Some years ago...
+to
+["call", "me", "ishmael", ".", "some", "years", "ago", "..."]
+```
+Another reason we do tozenization is because we will need to separate punctuation form the words.
+If we dont, the model will think ex. code? != code, even when the words are the same, n-gram won't recongize it bc of the ?
+To do this we will need to use regular expression (re)
+```
+r"\b\w+\b|[^\w\s]"
+```
+- \b\w+\b → matches words (letters/numbers between word boundaries)
+- [^\w\s] → matches anything that is not a word or space (punctuation)
+- | → “or”, so we get **either words or punctuation”
+
+
+Third Step
+Counting Bigrams. A bigram is two word sequence. counting bigrams means to find two sequence words that are frequent
+We want probabilities
+```
+Example: If “call” is always followed by “me”, then:
+P("me" | "call") = 1.0
+
+If “are” is followed by “cute”, “smart”, “playful” once each:
+P("cute" | "are") = 1/3
+```
+We need to do a dictionary, a dictionary is from the collections module
+```
+bigram_counts = defaultdict(lambda: defaultdict(int))
+```
+unlike regular dictionary, what defaultdict do is when u try to access a key that doesnt exit, it automatically creates it with deafult values.
+lambda is a anonymous function that you can use once:
+```
+Normally, you define a function with def and give it a name:
+
+def add_one(x):
+    return x + 1
+
+print(add_one(4)) 
+```
+An anonymous function is a function without a name.
+You don’t assign it a regular name with def.
+Instead, you write it “inline” wherever you need it.
+```
+Example:
+f = lambda x: x + 1
+print(f(4))  # Output: 5
+
+or
+
+print((lambda x: x + 1)(4))  # Output: 5
+```
+Why use anonymous functions?
+Short, quick functions you only need once.
+instead of creating a name function that only run once and never use it again, we can insetad call lambda so it basically acts as a replacement of a name function, and u can use it once
+basically to save code space, and more efficient
+So having another deafultdict inside a deafultdict help count the number of bigrams
+```
+Example:
+sentence: "I like AI"
+Bigrams: ("I", "like"), ("like", "AI")
+{
+    'I': {'like': 1},
+    'like': {'AI': 1}
+}
+```
+
+To find the counting bigram, this nexted defaultdict is neccessary
+```
+Sentence: "I like AI and I like Python"
+Bigram: ("I", "like"), ("like", "AI"), ("AI", "and"), ("and", "I"), ("I", "like"), ("like", "Python")
+
+{
+    'I': {'like': 2},            # 'I' is followed by 'like' twice
+    'like': {'AI': 1, 'Python': 1},  # 'like' is followed by 'AI' once and 'Python' once
+    'AI': {'and': 1},
+    'and': {'I': 1}
+}
+```
+
+
+Step Four
+Determine the probabilities of the n-gram counting words
+
+
+Step Five
+Predict the next word using both greedy and categorical sampling
+
+Greedy:
+    What key=next_words.get means:
+    key is an optional function that tells max() how to compare elements.
+    next_words.get is a function that returns the value for a given key in the dictionary.
+    ```
+    Step by step:
+    max(next_words, key=next_words.get)
+    Iterates over keys of next_words → 'like', 'love'
+
+    Compares them based on their value in the dictionary:
+    'like' → next_words.get('like') = 2
+    'love' → next_words.get('love') = 1
+    Returns the key with the maximum value → 'like'
+    ```
+
+Categorical sampling
+    words = list(next_words.keys())
+    weights = list(next_words.values())
+    return random.choices(words, weights=weights, k=1)[0]
+    
+    ```
+    Example:
+    words = list(next_words.keys())   # ['like', 'love']
+    weights = list(next_words.values())  # [2, 1]
+    ```
+
+    random.choices(words, weights=weights, k=1)
+    ```
+    Picks k elements randomly from words
+    weights tells Python how likely each word is:
+    k=1 → pick one word
+    Returns a list with 1 element: ['like'] or ['love']
+
+    >>> random.choices(['like', 'love'], weights=[2,1], k=1)
+    ['like']
+    >>> random.choices(['like', 'love'], weights=[2,1], k=1)[0]
+    'like
+    ```
