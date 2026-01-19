@@ -1,0 +1,66 @@
+Purpose of this section
+To develop a Python-based BPE tokenizer using a pre-specified corpus of text literature. 
+A simplified BPE tokenizer that reads Moby Dick and learn which character pairs to merge and store the result to use it to tokenize new text
+
+BPE is a tokenization technique that iteratively merges the most frequenct pairs of characters or subwords in a dataset to create a compact vocabulary
+
+Example of BPE in Genomics:
+Suppose we have a DNA sequence: ATTGCACT. The BPE process would:
+Start with individual nucleotides: A, T, G, C.
+Merge frequent pairs like AT, TG, and GC iteratively.
+Result in tokens such as ATT, GCA, and CT.
+
+A way to break words into subword pieces based on how often character pairs appear together
+Words like harpooneer:
+Instead of tokenizing by:
+["harpooneer"]
+
+BPE might produce:
+["har", "poon", "eer"]
+
+This reduces vocabulary size and handles unknown words better
+
+train(self, data_corpus, k=500) this metod learns the BPE merges and updates the self.vocabulary and runs k merge iteration
+while tokenize(self, word) takes a string and breaks it into BPE token and returns token and token individual
+
+How BPE training works:
+It initialize vocabulary then u treat it as an individual characters
+Then you count symbol pairs, bascially look at the adjacent pairs and count how often each pair appears accross the whole book
+Example:
+"Whale"
+["w", "h", "a", "l", "e"]
+(w, h), (h, a), (a, l), (l, e)
+("w", "h") → 8,432 times (most frequent pair) Merge that pair
+You replace:
+w h → wh
+
+So:
+w h a l e
+
+becomes:
+wh a l e
+
+Repeat k times
+Each iteration:
+Count pairs
+Merge most frequent
+Update vocabulary
+This loop runs k times.
+
+That’s exactly what:
+train(data_corpus, k=500)
+
+
+
+Once trained:
+Your vocabulary contains characters + merged tokens
+Tokenization means:
+Greedily match the longest tokens first
+
+Example:
+Vocabulary contains: ["wh", "ale"]
+Input text: "whale"
+
+Tokenization result:
+["wh", "ale"]
+Then convert tokens → IDs using self.vocabularly.

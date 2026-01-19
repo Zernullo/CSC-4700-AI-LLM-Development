@@ -1,8 +1,9 @@
 """
-CSC 4700 Homework 1: n-gram Language Models
+CSC 4700 Homework 1: N-Gram Models and BPE
 Author: Daniel Guo
 Instructor: Dr. Keith Mills
 
+Section 1: N-Gram Models
 Implement bigram and trigram probabilistic language models and understand how they 
 operate on a code-level.
 
@@ -20,13 +21,18 @@ import random
 import re
 from collections import defaultdict
 
+# Since lambda functions cannot be pickled, we define a named function to return defaultdict(int)
+# pickle cannot save lambda functions as well as functions defined in another function, and pickle can only save things that are globally defined
+def int_defaultdict():
+    return defaultdict(int)
+
 class NGramModel:
     def __init__(self, n):
         if n not in (2, 3):
             raise ValueError("n must be 2 (bigram) or 3 (trigram)")
         self.n = n # n-gram size
         self.vocab = set() # Vocabulary set, help to track words seen during training so bascially no duplicates words
-        self.ngram_counts = defaultdict(lambda: defaultdict(int)) # Nested dictionary for n-gram counts
+        self.ngram_counts = defaultdict(int_defaultdict) # Nested dictionary for n-gram counts, lambda doesnt work here because of pickle serialization issues
         self.ngram_probs = {} # Nested dictionary for n-gram probabilities
 
     # Tokenizes the input text into tokens (words and punctuation).
