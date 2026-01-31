@@ -81,7 +81,6 @@ openrouter_client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
 
-test_question = questions[:6]
 # ============================================================================
 # QUESTION 2: GPT-5-nano using OpenAI Batch API
 # ============================================================================
@@ -89,7 +88,7 @@ test_question = questions[:6]
 Use GPT-5-nano to answer a simple question in a certain persona
 """
 gpt_5_nano_answer = []
-def gpt_5(questions, batch_size=3):
+def gpt_5(questions, batch_size=100):
     global gpt_5_nano_answer
     gpt_5_nano_answer = []
     print("Starting GPT-5-nano batch processing...")
@@ -148,8 +147,8 @@ def gpt_5(questions, batch_size=3):
                 completed_batches.append(batch_id)
                 print(f"  Batch {batch_id_to_number[batch_id]} completed.")
         if len(completed_batches) < len(batch_ids):
-            print("  Waiting for 10 seconds before checking again...")
-            time.sleep(10)
+            print("  Waiting for 1 minute before checking again...")
+            time.sleep(60)
     print(f"\n✓ All batches finished!")
 
     # Step 3: Download and merge results
@@ -254,7 +253,7 @@ class ScoringResponse(BaseModel):
     explanation: str = Field(description="A short explanation of why the student's answer was correct or incorrect")
     score: bool = Field(description="true if the student's answer was correct, false if it was incorrect")
 
-def scoring_result(model_name, result_file):
+def scoring_result(model_name, result_file, batch_size=100):
     print(f"Starting scoring for {model_name}...")
     
     with open(result_file, "r", encoding="utf-8") as f:
@@ -264,115 +263,157 @@ def scoring_result(model_name, result_file):
     completed = sum(1 for r in results if str(r.get("answer", "")).strip())
     completion_rate = (completed / total) * 100 if total else 0
 
-    input_file = f"{model_name}_scoring_requests.jsonl"
-    with open(input_file, "w", encoding="utf-8") as f:
-        for i, result in enumerate(results):
-            request = {
-                "custom_id": f"{model_name}-score-{i}",
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": {
-                    "model": "gpt-5-mini",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content":
-                            "You are a teacher tasked with determining whether a student's answer to a question was correct, "
-                            "based on a set of possible correct answers. You must only use the provided possible correct "
-                            "answers to determine if the student's response was correct."
-                        },
-                        {
-                            "role": "user",
-                            "content":
-                            f"Question: {result['question']}\n"
-                            f"Student's Response: {result['answer']}\n"
-                            f"Possible Correct Answers:\n{result['ground_truth']}\n"
-                            f"Your response should only be a valid Json as shown below:\n"
-                            "{\n"
-                            "  \"explanation\" (str): A short explanation of why the student's answer was correct or incorrect.,\n"
-                            "  \"score\" (bool): true if the student's answer was correct, false if it was incorrect\n"
-                            "}\n"
-                            "Your response:"
-                        }
-                    ],
-                    "response_format": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "ScoringResponse",
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "explanation": {"type": "string"},
-                                    "score": {"type": "boolean"}
-                                },
-                                "required": ["explanation", "score"],
-                                "additionalProperties": False
+    # Step 1: Create and submit batches
+    print(f"\nStep 1: Creating batches of {batch_size} questions...")
+    batch_ids = []
+    batch_number = 0
+    batch_id_to_number = {}
+    
+    for i in range(0, len(results), batch_size):
+        batch_results = results[i:i+batch_size]
+        batch_number += 1
+        input_file = f"{model_name}_scoring_batch_{batch_number}_requests.jsonl"
+        
+        with open(input_file, "w", encoding="utf-8") as f:
+            for j, result in enumerate(batch_results):
+                global_index = i + j
+                request = {
+                    "custom_id": f"{model_name}-batch{batch_number}-score-{global_index}",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": "gpt-5-mini",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content":
+                                "You are a teacher tasked with determining whether a student's answer to a question was correct, "
+                                "based on a set of possible correct answers. You must only use the provided possible correct "
+                                "answers to determine if the student's response was correct."
+                            },
+                            {
+                                "role": "user",
+                                "content":
+                                f"Question: {result['question']}\n"
+                                f"Student's Response: {result['answer']}\n"
+                                f"Possible Correct Answers:\n{result['ground_truth']}\n"
+                                f"Your response should only be a valid Json as shown below:\n"
+                                "{\n"
+                                "  \"explanation\" (str): A short explanation of why the student's answer was correct or incorrect.,\n"
+                                "  \"score\" (bool): true if the student's answer was correct, false if it was incorrect\n"
+                                "}\n"
+                                "Your response:"
                             }
-                        }
-                    },
+                        ],
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "ScoringResponse",
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "explanation": {"type": "string"},
+                                        "score": {"type": "boolean"}
+                                    },
+                                    "required": ["explanation", "score"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                    }
                 }
-            }
-            f.write(json.dumps(request) + "\n")
+                f.write(json.dumps(request) + "\n")
 
-    file = openai_client.files.create(
-        file=open(input_file, "rb"),
-        purpose="batch"
-    )
+        # Upload file
+        batch_input_file = openai_client.files.create(
+            file=open(input_file, "rb"),
+            purpose="batch"
+        )
 
-    batch = openai_client.batches.create(
-        input_file_id=file.id,
-        endpoint="/v1/chat/completions",
-        completion_window="24h"
-    )
-    print(f"Batch submitted: {batch.id}")
+        # Create batch job
+        batch = openai_client.batches.create(
+            input_file_id=batch_input_file.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h"
+        )
+        batch_ids.append(batch.id)
+        batch_id_to_number[batch.id] = batch_number
+        print(f"  Batch {batch_number}: {batch.id} submitted ({len(batch_results)} questions)")
 
-    # Wait for batch to complete with live status
-    last_status = None
-    while True:
-        status = openai_client.batches.retrieve(batch.id)
-        if status.status != last_status:
-            print(f"Batch status: {status.status}")
-            last_status = status.status
-        if status.status == "completed":
-            break
-        if status.status in ("failed", "cancelled", "expired"):
-            print(f"Batch ended with status: {status.status}")
-            if status.error_file_id:
-                err = openai_client.files.content(status.error_file_id).text
-                print(f"Batch errors:\n{err}")
-            return
-        time.sleep(10)
+    print(f"\n✓ All {len(batch_ids)} batch(es) submitted!")
 
-    if status.error_file_id:
-        err = openai_client.files.content(status.error_file_id).text
-        print(f"Batch errors:\n{err}")
+    # Step 2: Wait for all batches to complete
+    print(f"\nStep 2: Waiting for batches to complete...")
+    completed_batches = []
+    while len(completed_batches) < len(batch_ids):
+        for batch_id in batch_ids:
+            if batch_id in completed_batches:
+                continue
+            batch_status = openai_client.batches.retrieve(batch_id)
+            if batch_status.status == "completed":
+                completed_batches.append(batch_id)
+                print(f"  Batch {batch_id_to_number[batch_id]} completed.")
+            elif batch_status.status in ("failed", "cancelled", "expired"):
+                print(f"  Batch {batch_id_to_number[batch_id]} ended with status: {batch_status.status}")
+                if batch_status.error_file_id:
+                    err = openai_client.files.content(batch_status.error_file_id).text
+                    print(f"  Batch {batch_id_to_number[batch_id]} errors:\n{err}")
+                completed_batches.append(batch_id)  # Mark as done even if failed
+        if len(completed_batches) < len(batch_ids):
+            print("  Waiting for 1 minute before checking again...")
+            time.sleep(60)
+    print(f"\n✓ All batches finished!")
 
-    content = openai_client.files.content(status.output_file_id).text
-
+    # Step 3: Download and merge results
+    print(f"\nStep 3: Downloading and merging results...")
     scored_result = []
-    lines = content.splitlines()
-    total_lines = len(lines)
-
-    for idx, line in enumerate(lines, 1):
-        r = json.loads(line)
-        custom_id = r["custom_id"]
-        index = int(custom_id.split('-')[-1])
-        parsed = r["response"]["body"]["choices"][0]["message"]["content"]
-        if not parsed:
+    
+    for batch_id in batch_ids:
+        batch_obj = openai_client.batches.retrieve(batch_id)
+        if batch_obj.status != "completed":
+            print(f"Skipping batch {batch_id_to_number[batch_id]} (status: {batch_obj.status})")
             continue
-        parsed_json = json.loads(parsed)
 
-        scored_result.append({
-            "question": results[index]["question"],
-            "student_answer": results[index]["answer"],
-            "ground_truth_answers": results[index]["ground_truth"],
-            "explanation": parsed_json["explanation"],
-            "score": parsed_json["score"]
-        })
+        if batch_obj.error_file_id:
+            err = openai_client.files.content(batch_obj.error_file_id).text
+            print(f"Batch {batch_id_to_number[batch_id]} errors:\n{err}")
 
-        if idx in (1, total_lines // 10, total_lines // 2, total_lines):
-            pct = (idx / total_lines) * 100 if total_lines else 100
-            print(f"Scoring parse progress: {idx}/{total_lines} ({pct:.0f}%)")
+        if not batch_obj.output_file_id:
+            print(f"Batch {batch_id_to_number[batch_id]} has no output_file_id.")
+            continue
+
+        content = openai_client.files.content(batch_obj.output_file_id).text
+        if not content.strip():
+            print(f"Batch {batch_id_to_number[batch_id]} output is empty.")
+            continue
+
+        # Save batch results locally
+        results_file = f"{model_name}_scoring_batch_{batch_id_to_number[batch_id]}_results.jsonl"
+        with open(results_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # Parse each line in results
+        lines = content.splitlines()
+        for line in lines:
+            r = json.loads(line)
+            custom_id = r["custom_id"]
+            index = int(custom_id.split('-')[-1])
+            parsed = r["response"]["body"]["choices"][0]["message"]["content"]
+            if not parsed:
+                continue
+            parsed_json = json.loads(parsed)
+
+            scored_result.append({
+                "question": results[index]["question"],
+                "student_answer": results[index]["answer"],
+                "ground_truth_answers": results[index]["ground_truth"],
+                "explanation": parsed_json["explanation"],
+                "score": parsed_json["score"]
+            })
+        
+        print(f"  Processed batch {batch_id_to_number[batch_id]} ({len(lines)} scores)")
+
+    print(f"Collected {len(scored_result)} scored results from {model_name}.")
 
     # Save scored results to file
     output_filename = f"{model_name}-scored-{CURRENT_DATE}-hw2.json"
@@ -425,9 +466,9 @@ while True:
         "Choice: "
     )
     if choice == "1":
-        gpt_5(test_question)
+        gpt_5(questions)
     elif choice == "2":
-        qwen3_8b(test_question)
+        qwen3_8b(questions)
     elif choice == "3":
 
         gpt_filename = f"gpt-5-nano-{CURRENT_DATE}-hw2.json"
