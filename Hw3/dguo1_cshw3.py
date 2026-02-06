@@ -169,10 +169,11 @@ openrouter_client = OpenAI(
 gpt_5_nano_answer = []
 def gpt_5(questions, batch_size=100):
     """
-    Process questions using OpenAI's Batch API with GPT-5-nano model.
+    Process questions using OpenAI's Batch API with GPT-5-nano model and RAG.
     
-    This function divides questions into batches, submits them to OpenAI's
-    Batch API, waits for completion, and downloads/merges the results.
+    This function divides questions into batches, retrieves relevant context
+    from ChromaDB using semantic search, and submits RAG-augmented requests
+    to OpenAI's Batch API.
     
     Args:
         questions (list): List of question dictionaries with 'question',
@@ -205,6 +206,22 @@ def gpt_5(questions, batch_size=100):
         input_file = f"batch_{batch_number}_requests.jsonl"
         with open(input_file, 'w', encoding='utf-8') as f:
             for j, q in enumerate(batch_questions):
+                # RAG: Query Chroma to retrieve 5 most relevant contexts
+                rag_results = chroma_collection.query(
+                    query_texts=[q["question"]],
+                    n_results=5
+                )
+                
+                # Extract context documents from query results
+                contexts = rag_results.get("documents", [[]])[0]
+                context_str = "\n\n".join(contexts) if contexts else ""
+                
+                # Format user message with context
+                context_prompt = (
+                    f"Context:\n{context_str}\n\n"
+                    f"Question: {q['question']}"
+                )
+                
                 # Each request includes custom_id for tracking
                 request = {
                     "custom_id": f"batch{batch_number}-q{j}",
@@ -216,12 +233,12 @@ def gpt_5(questions, batch_size=100):
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "Answer briefly, 1-5 words. Do "
-                                          "not explain your reasoning. If "
-                                          "ambiguous, provide the most "
-                                          "common answer."
+                                "content":  "Answer concise from context, "
+                                            "1-5 words. Do not explain "
+                                            "your reasoning. If ambiguous, provide the "
+                                            "most common answer."
                             },
-                            {"role": "user", "content": q["question"]}
+                            {"role": "user", "content": context_prompt}
                         ],
                         # Explicitly request text response format
                         "response_format": {"type": "text"},
@@ -351,14 +368,14 @@ def gpt_5(questions, batch_size=100):
     print(f"Collected {len(gpt_5_nano_answer)} answers from GPT-5-nano.")
 
     # Save consolidated results to timestamped JSON file
-    filename = f"gpt-5-nano-{CURRENT_DATE}-hw2.json"
+    filename = f"gpt-5-nano-{CURRENT_DATE}-hw3.json"
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(gpt_5_nano_answer, f, indent=2, ensure_ascii=False)
     print(f"Saved {len(gpt_5_nano_answer)} GPT-5-nano answers to {filename}")
 
 
 # ===========================================================================
-# STEP 5: QWEN3-8B USING OPENROUTER API WITH RAG
+# STEP 4: QWEN3-8B USING OPENROUTER API WITH RAG
 # ===========================================================================
 
 # Global list to store Qwen3-8b answers
@@ -367,10 +384,10 @@ qwen3_8b_answer = []
 
 def qwen3_8b(questions):
     """
-    Process questions sequentially using Qwen3-8b model via OpenRouter API.
+    Process questions sequentially using Qwen3-8b model via OpenRouter API with RAG.
     
     This function sends questions one at a time to the Qwen3-8b model,
-    collecting responses sequentially rather than in batches.
+    retrieving relevant context from ChromaDB and including it with each query.
     
     Args:
         questions (list): List of question dictionaries with 'question',
@@ -388,17 +405,34 @@ def qwen3_8b(questions):
     
     # Process each question individually
     for i, q in enumerate(questions):
+        # RAG: Query Chroma to retrieve 5 most relevant contexts
+        rag_results = chroma_collection.query(
+            query_texts=[q["question"]],
+            n_results=5
+        )
+        
+        # Extract context documents from query results
+        contexts = rag_results.get("documents", [[]])[0]
+        context_str = "\n\n".join(contexts) if contexts else ""
+        
+        # Format user message with context
+        context_prompt = (
+            f"Context:\n{context_str}\n\n"
+            f"Question: {q['question']}"
+        )
+        
         # Make API call to Qwen3-8b model
         response = openrouter_client.chat.completions.create(
             model='qwen/qwen3-8b',
             messages=[
                 {
                     "role": "system",
-                    "content": "Answer briefly, 1-5 words. Do not explain "
+                    "content": "Answer concise from context, "
+                              "1-5 words. Do not explain "
                               "your reasoning. If ambiguous, provide the "
                               "most common answer."
                 },
-                {"role": "user", "content": q["question"]}
+                {"role": "user", "content": context_prompt}
             ],
             # Lower temperature for more deterministic answers
             temperature=0.3,
@@ -419,14 +453,14 @@ def qwen3_8b(questions):
             print(f"Processed {i + 1}/{len(questions)} questions")
     
     # Save results to timestamped JSON file
-    filename = f"qwen3-8b-{CURRENT_DATE}-hw2.json"
+    filename = f"qwen3-8b-{CURRENT_DATE}-hw3.json"
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(qwen3_8b_answer, f, indent=2, ensure_ascii=False)
     print(f"Saved {len(qwen3_8b_answer)} Qwen3-8b answers to {filename}")
 
 
 # ===========================================================================
-# STEP 6: SCORING THE MODEL ANSWERS
+# STEP 5: SCORING THE MODEL ANSWERS
 # ===========================================================================
 
 class ScoringResponse(BaseModel):
@@ -696,7 +730,7 @@ def scoring_result(model_name, result_file, batch_size=100):
           f"{model_name}.")
 
     # Save consolidated scored results to timestamped JSON file
-    output_filename = f"{model_name}-scored-{CURRENT_DATE}-hw2.json"
+    output_filename = f"{model_name}-RAG-{CURRENT_DATE}-hw3.json"
     with open(output_filename, 'w', encoding='utf-8') as f:
         json.dump(scored_result, f, indent=2, ensure_ascii=False)
 
@@ -711,7 +745,7 @@ def scoring_result(model_name, result_file, batch_size=100):
 
 
 # ===========================================================================
-# STEP 7: IMAGE CREATION WITH GPT-IMAGE-1
+# STEP 6: IMAGE CREATION WITH GPT-IMAGE-1
 # ===========================================================================
 
 def image_creation(quality, size):
@@ -783,8 +817,8 @@ while True:
         # Score both models' responses using GPT-5-mini
         
         # Construct expected filenames based on current date
-        gpt_filename = f"gpt-5-nano-{CURRENT_DATE}-hw2.json"
-        qwen_filename = f"qwen3-8b-{CURRENT_DATE}-hw2.json"
+        gpt_filename = f"gpt-5-nano-{CURRENT_DATE}-hw3.json"
+        qwen_filename = f"qwen3-8b-{CURRENT_DATE}-hw3.json"
         
         # Check if answer files exist before attempting to score
         if (not os.path.exists(gpt_filename) or
