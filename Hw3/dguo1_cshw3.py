@@ -402,9 +402,13 @@ def qwen3_8b(questions):
     qwen3_8b_answer = []
     
     print("Starting Qwen3-8b sequential processing...")
+    print(f"Processing {len(questions)} questions with RAG context retrieval...")
     
     # Process each question individually
     for i, q in enumerate(questions):
+        # Show progress for each question
+        print(f"Processing question {i + 1}/{len(questions)}...", end='\r')
+        
         # RAG: Query Chroma to retrieve 5 most relevant contexts
         rag_results = chroma_collection.query(
             query_texts=[q["question"]],
@@ -421,24 +425,39 @@ def qwen3_8b(questions):
             f"Question: {q['question']}"
         )
         
-        # Make API call to Qwen3-8b model
-        response = openrouter_client.chat.completions.create(
-            model='qwen/qwen3-8b',
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Answer concise from context, "
-                              "1-5 words. Do not explain "
-                              "your reasoning. If ambiguous, provide the "
-                              "most common answer."
-                },
-                {"role": "user", "content": context_prompt}
-            ],
-            # Lower temperature for more deterministic answers
-            temperature=0.3,
-            top_p=1,
-            n=1
-        )
+        # Make API call to Qwen3-8b model (retry on non-200)
+        while True:
+            try:
+                response = openrouter_client.chat.completions.create(
+                    model='qwen/qwen3-8b',
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Answer concise from context, "
+                                      "1-5 words. Do not explain "
+                                      "your reasoning. If ambiguous, provide the "
+                                      "most common answer."
+                        },
+                        {"role": "user", "content": context_prompt}
+                    ],
+                    # Lower temperature for more deterministic answers
+                    temperature=0.3,
+                    top_p=1,
+                    n=1
+                )
+                status = getattr(response, "status_code", 200)
+                if status != 200:
+                    print(f"\nNon-200 status {status} on question {i + 1}. Retrying...")
+                    time.sleep(2)
+                    continue
+                break
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                if status is not None and status != 200:
+                    print(f"\nNon-200 status {status} on question {i + 1}. Retrying...")
+                else:
+                    print(f"\nRequest error on question {i + 1}: {str(e)[:80]}")
+                time.sleep(2)
 
         # Append question-answer pair with ground truth
         qwen3_8b_answer.append({
@@ -448,10 +467,10 @@ def qwen3_8b(questions):
             "ground_truth": q['answers']
         })
         
-        # Display progress every 10 questions
+        # Display progress milestone every 10 questions
         if (i + 1) % 10 == 0:
-            print(f"Processed {i + 1}/{len(questions)} questions")
-    
+            print(f"Processed {i + 1}/{len(questions)} questions" + " " * 20)
+            
     # Save results to timestamped JSON file
     filename = f"qwen3-8b-{CURRENT_DATE}-hw3.json"
     with open(filename, 'w', encoding='utf-8') as f:

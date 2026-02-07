@@ -65,6 +65,7 @@ data/
 models/
 *.csv
 *.json
+*.jsonl
 
 # Logs
 *.log
