@@ -127,6 +127,8 @@ TOOL_HINTS: Dict[str, Dict[str, Any]] = {
 
 
 @dataclass
+
+
 class StepRecord:
     """Telemetry recorded for each executed step (action)."""
 
@@ -138,6 +140,8 @@ class StepRecord:
 
 
 @dataclass
+
+
 class ControllerState:
     """Mutable task state carried through the controller loop."""
 
@@ -224,6 +228,7 @@ def looks_stuck(action: str, args: Dict[str, Any]) -> bool:
 
 # Arg Validation & Repair --------------------------------------------------
 
+
 def validate_args(
     tool_name: str,
     args: Dict[str, Any]
@@ -283,6 +288,7 @@ def repair_args_with_llm(
 
 # History Summarization ----------------------------------------------------
 
+
 def update_summary(state: ControllerState, new_evidence: str) -> None:
     """
     Compress the prior summary and new evidence into a rolling memory.
@@ -314,6 +320,7 @@ def update_summary(state: ControllerState, new_evidence: str) -> None:
 
 
 # Planner ------------------------------------------------------------------
+
 
 def plan_next_action(
     state: ControllerState
@@ -394,6 +401,7 @@ def plan_next_action(
 
 
 # Executor -----------------------------------------------------------------
+
 
 def execute_action(
     action: str,
@@ -634,6 +642,7 @@ def execute_action(
 
 # Final Synthesis ----------------------------------------------------------
 
+
 def synthesize_answer(state: ControllerState) -> str:
     """
     Produce the final answer using only the accumulated working summary.
@@ -664,6 +673,7 @@ def synthesize_answer(state: ControllerState) -> str:
 
 
 # Controller Loop ----------------------------------------------------------
+
 
 def run_agent(goal: str) -> str:
     """
