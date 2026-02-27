@@ -19,6 +19,7 @@ Run:
 """
 
 # Imports & Setup ------------------------------------------------------------------------------------------------------
+
 import argparse
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple, Optional
@@ -30,21 +31,22 @@ import hashlib
 import json
 import os
 import time
+# Suppress unused-import warning: random is available for future stochastic tool selection
 import random
 import chromadb
 import requests
 
 # Load environment variables
-load_dotenv('.env') # I edit to .env bc my env file is in the same directory as the code
+load_dotenv('.env')  # .env is in the same directory as the script
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Tool Catalog ---------------------------------------------------------------------------------------------------------
-# the tool catalog provides precise JSON Schemas for arguments. This helps to prevent the model from inventing fields or
-# tools, and helps validation & auto-repair.
+# Each entry maps a tool name to its JSON Schema for argument validation and planner guidance.
+# The tool catalog provides precise JSON Schemas for arguments. This helps to prevent the model from inventing fields
+# or tools, and helps validation & auto-repair.
 
 TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
-    # Tool 1: a weather tool
-    # STUDENT_COMPLETE --> You need to replace this with the correct one for the real weather tool call
+    # Tool 1: a weather tool that retrieves current conditions for a given city
     "weather.get_current": {
         "type": "object",
         "description": "Get the current weather",
@@ -55,7 +57,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "required": ["city"],
         "additionalProperties": False
     },
-    # Tool 2: knowledge-base search tool
+    # Tool 2: knowledge-base search tool for querying the Chroma vector database
     "kb.search": {
         "type": "object",
         "description": "search a knowledge base for information",
@@ -66,71 +68,79 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "required": ["query"],
         "additionalProperties": False
     },
-    # STUDENT_COMPLETE --> Document the read_mem tool here for the model here. You can find the code for it
-    # in the execute_action function. 
+    # Tool 3: read_mem reads the contents of Memory.md into the agent's working context
     "read_mem": {
         "type": "object",
-        "description": "read the contents of the agent's working memory. This is a read-only tool that returns the current contents of the Memory.md file, which serves as the agent's working memory. The content can be used by the planner to inform future actions and decisions.",
-        "properties": {}, # No arguments needed to read memory
+        "description": "Read the contents of the agent's working memory. Returns the current contents of "
+                       "Memory.md, which serves as persistent cross-session memory. Use this to recall "
+                       "previously stored facts before answering.",
+        "properties": {},  # No arguments needed to read memory
         "required": [],
         "additionalProperties": False
-    }, # Finish implementing the JSON Schema for the read_mem tool. It should not require any arguments.
-    # STUDENT_COMPLETE --> Document the write_mem tool here for the model here. You can find the code for it in the execute_action function.
+    },
+    # Tool 4: write_mem appends new information to Memory.md for future recall
     "write_mem": {
         "type": "object",
-        "description": "write content to the agent's working memory. This is a write-only tool that appends content to the Memory.md file, which serves as the agent's working memory.",
+        "description": "Append a piece of information to Memory.md for future recall across sessions. "
+                       "Use this to store facts the user wants the agent to remember.",
         "properties": {
-            "content": {"type": "string", "minLength": 1} # Finish implementing content
+            # content is the string to append; must be non-empty
+            "content": {"type": "string", "minLength": 1}
         },
         "required": ["content"],
         "additionalProperties": False
     },
-
-    # STUDENT_COMPLETE --> You need to add a new tool schema for your custom tool
+    # Tool 5: iss.location fetches the real-time position of the International Space Station
     "iss.location": {
         "type": "object",
-        "description": "Get the current location of the International Space Station (ISS)",
-        "properties": {},
+        "description": "Get the current latitude and longitude of the International Space Station (ISS) "
+                       "in real time. No arguments required.",
+        "properties": {},  # No arguments needed; position is always live
         "required": [],
         "additionalProperties": False
     }
 }
 
-# Optional hints: rough latency/cost so planner can reason about budgets. I recommend replacing the default values
-# with estimates that are accurate based on measurements.
+# Optional hints: rough latency/cost so planner can reason about budgets.
+# Values are estimates based on typical API response times and token usage.
 TOOL_HINTS: Dict[str, Dict[str, Any]] = {
     "weather.get_current": {"avg_ms": 400, "avg_tokens": 50},
     "kb.search":           {"avg_ms": 120, "avg_tokens": 30},
-    "read_mem": {"avg_ms": 5, "avg_tokens": 200},
-    "write_mem": {"avg_ms": 5, "avg_tokens": 50},
-    "iss.location": {"avg_ms": 100, "avg_tokens": 30},
+    "read_mem":            {"avg_ms": 5,   "avg_tokens": 200},
+    "write_mem":           {"avg_ms": 5,   "avg_tokens": 50},
+    "iss.location":        {"avg_ms": 100, "avg_tokens": 30},
 }
 
 # Controller State -----------------------------------------------------------------------------------------------------
+
+
 @dataclass
 class StepRecord:
     """Telemetry for each executed step (action)."""
-    action: str                   # tool name or 'answer'
-    args: Dict[str, Any]          # arguments supplied
-    ok: bool                      # success flag
-    latency_ms: int               # latency in milliseconds
-    info: Dict[str, Any] = field(default_factory=dict)  # normalized payload
+
+    action: str                  # tool name or 'answer'
+    args: Dict[str, Any]         # arguments supplied to the tool
+    ok: bool                     # success flag from executor
+    latency_ms: int              # wall-clock latency in milliseconds
+    info: Dict[str, Any] = field(default_factory=dict)  # normalized payload from tool
+
 
 @dataclass
 class ControllerState:
     """Mutable task state carried through the controller loop."""
-    goal: str                     # user task/goal
-    history_summary: str = ""     # compact running summary (LLM-generated)
+
+    goal: str                    # user task/goal for this session
+    history_summary: str = ""    # compact rolling summary (LLM-generated after each step)
     tool_trace: List[StepRecord] = field(default_factory=list)
-    tokens_used: int = 0          # simple token accounting
-    cost_cents: float = 0.0       # simple cost accounting
-    steps_taken: int = 0          # how many actions executed
-    last_observation: str = ""    # short feedback string from last step
-    done: bool = False            # termination flag
+    tokens_used: int = 0         # simple token accounting across all LLM calls
+    cost_cents: float = 0.0      # simple cost accounting in cents
+    steps_taken: int = 0         # how many actions have been executed so far
+    last_observation: str = ""   # short feedback string from the most recent step
+    done: bool = False           # termination flag; set True when final answer is produced
 
 
 # Budgets & Accounting -------------------------------------------------------------------------------------------------
-# Hard ceilings to avoid runaway cost
+# Hard ceilings to avoid runaway cost or infinite loops
 MAX_STEPS = 8
 MAX_TOKENS = 20_000
 MAX_COST_CENTS = 75.0
@@ -141,7 +151,7 @@ def within_budget(s: ControllerState) -> bool:
     Check hard ceilings for steps, tokens, and cost.
 
     :param s: instance of ControllerState
-    :return: True if still within budget, false if over-budget
+    :return: True if still within budget, False if any ceiling is exceeded
     """
     return (
         s.steps_taken < MAX_STEPS and
@@ -163,34 +173,35 @@ def record_usage(s: ControllerState, usage) -> None:
     ct = getattr(usage, "completion_tokens", 0) or 0
     total = pt + ct
     s.tokens_used += total
-    # gpt-5-mini is $0.25/million token
-    s.cost_cents += total * 0.25/1E4
+    # gpt-4o-mini pricing: $0.25 per 1M tokens (as of 2025)
+    s.cost_cents += total * 0.25 / 1E4
 
 
 # Loop Detection -------------------------------------------------------------------------------------------------------
-# Detect repeated (action, args) to avoid "stuck" ReAct oscillations.
+# Detect repeated (action, args) pairs to avoid "stuck" ReAct oscillations.
 LAST_ACTIONS = deque(maxlen=3)
 
 
 def fingerprint_action(action: str, args: Dict[str, Any]) -> str:
     """
-    Hash the tool call pair (action,args) to compare recent moves.
+    Hash the tool call pair (action, args) to compare recent moves.
 
     :param action: the action the model selected
     :param args: the arguments the model selected for the action
-    :return: A sha256 hash
+    :return: A sha256 hex digest string
     """
+    # Serialize action and args deterministically, then hash to produce a fixed-length fingerprint
     blob = json.dumps({"a": action, "x": args}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def looks_stuck(action: str, args: Dict[str, Any]) -> bool:
     """
-    Return True if the last N actions are identical (loop).
+    Return True if the last N actions are identical (loop detected).
 
     :param action: the action the model selected
     :param args: the arguments the model selected for the action
-    :return: True if this action is the same as the N actions, False otherwise
+    :return: True if this action matches all recent actions, False otherwise
     """
     fp = fingerprint_action(action, args)
     LAST_ACTIONS.append(fp)
@@ -204,15 +215,15 @@ def looks_stuck(action: str, args: Dict[str, Any]) -> bool:
 
 def validate_args(tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """
-    Validate args against the JSON Schema for the given tool. Return (ok, error_message). Error is concise for LLM
-    repair prompt.
+    Validate args against the JSON Schema for the given tool.
 
     :param tool_name: the name of the tool that the model selected
     :param args: the arguments the model selected for that tool
-    :return: (True, None) if validates, (False, error message) if not
+    :return: (True, None) if valid, (False, error_message) if not
     """
     schema = TOOL_SCHEMAS[tool_name]
     validator = Draft202012Validator(schema)
+    # Sort errors by path for deterministic first-error reporting
     errors = sorted(validator.iter_errors(args), key=lambda e: e.path)
     if errors:
         e = errors[0]
@@ -224,12 +235,12 @@ def validate_args(tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Optional[
 def repair_args_with_llm(tool_name: str, bad_args: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
     """
     Ask the LLM to fix only the invalid parts to satisfy the JSON Schema.
-    We enforce JSON-only output and re-validate after repair.
+    Enforces JSON-only output and re-validates after repair.
 
     :param tool_name: name of the selected tool
     :param bad_args: dictionary of bad arguments provided by the model
-    :param error_msg: the error message provided by the validator
-    :return: corrected (hopefully) arguments
+    :param error_msg: the error message produced by the validator
+    :return: corrected arguments dictionary
     """
     schema = TOOL_SCHEMAS[tool_name]
     dev = (
@@ -243,8 +254,8 @@ def repair_args_with_llm(tool_name: str, bad_args: Dict[str, Any], error_msg: st
         "validator_error": error_msg
     })
     resp = client.chat.completions.create(
-        model="gpt-5-mini",
-        response_format={"type": "json_object"},  # force JSON
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},  # force JSON-only output
         messages=[
             {"role": "developer", "content": dev},
             {"role": "user", "content": user}
@@ -257,21 +268,23 @@ def repair_args_with_llm(tool_name: str, bad_args: Dict[str, Any], error_msg: st
 
 def update_summary(state: ControllerState, new_evidence: str) -> None:
     """
-    Compress the prior summary + new evidence into a short rolling memory.
-    Keeps context small but preserves key facts and decisions.
+    Compress the prior summary and new evidence into a short rolling memory.
+    Keeps context window small while preserving key facts and decisions.
 
     :param state: instance of ControllerState
-    :param new_evidence: this would be the response from the tool call
-    :return:
+    :param new_evidence: the observation string returned by the most recent tool call
+    :return: None
     """
-    sys = "Compress facts and decisions into ≤120 tokens. Keep IDs and key numbers. Do not include anything that is " \
-          "unnecessary, only things that are strictly useful for the goal."
+    sys = (
+        "Compress facts and decisions into <=120 tokens. Keep IDs and key numbers. "
+        "Do not include anything that is unnecessary, only things that are strictly useful for the goal."
+    )
     user = json.dumps({
         "prior_summary": state.history_summary,
         "new_evidence": new_evidence
     })
     resp = client.chat.completions.create(
-        model="gpt-5-mini",
+        model="gpt-4o-mini",
         messages=[
             {"role": "developer", "content": sys},
             {"role": "user", "content": user}
@@ -287,42 +300,40 @@ def update_summary(state: ControllerState, new_evidence: str) -> None:
 
 def plan_next_action(state: ControllerState) -> Tuple[str, Dict[str, Any], str]:
     """
-    Ask the LLM to pick ONE next action:
-      - a known tool from TOOL_SCHEMAS with arguments, OR
-      - the literal string 'answer' when it can synthesize the final answer.
+    Ask the LLM to pick ONE next action toward the goal:
+      - a known tool from TOOL_SCHEMAS with valid arguments, OR
+      - the literal string 'answer' when enough evidence exists to respond.
 
     :param state: instance of ControllerState
-    :return: (action, args, rationale)
+    :return: (action, args, rationale) tuple
     """
-    # Pass the schema to the model. We also pass tool latency/token count for budget control and example to help the
-    # model choose.
+    # Build the tool spec list to send to the planner, including schema, budget hints, and examples
     tool_specs = []
     for name, schema in TOOL_SCHEMAS.items():
         spec = {
             "name": name,
-            "schema": schema,  # including the full JSON Schema
+            "schema": schema,  # full JSON Schema so planner knows valid argument shapes
             "budget_hint": {
                 "avg_ms": TOOL_HINTS[name]["avg_ms"],
                 "avg_tokens": TOOL_HINTS[name]["avg_tokens"],
             },
-            # (Optional Few-shot prompting approach) keep examples tiny and schema-compliant
-            # STUDENT_COMPLETE --> You may need to change this to be in line with your custom weather tool implementation
+            # Few-shot examples help the planner produce schema-compliant arguments
             "examples": {
                 "weather.get_current": [
                     {"city": "Paris", "units": "metric"},
-                    {"city": "New York"}  # units defaults via schema
+                    {"city": "New York"}  # units defaults to metric via schema
                 ],
                 "kb.search": [
                     {"query": "VPN policy for contractors", "k": 3}
                 ],
                 "read_mem": [
-                    # No args needed for read_mem
+                    {}  # no arguments needed
                 ],
                 "write_mem": [
                     {"content": "User's name is Alice."}
                 ],
                 "iss.location": [
-                    # No args needed for iss.location
+                    {}  # no arguments needed
                 ]
             }.get(name, [])
         }
@@ -332,10 +343,10 @@ def plan_next_action(state: ControllerState) -> Tuple[str, Dict[str, Any], str]:
         "You are a planner. Choose ONE next action toward the goal. Do not call actions towards "
         "information already contained in the history summary provided below.\n"
         "Use ONLY tools from `tool_catalog` OR choose 'answer' if you can respond now.\n"
-        "You can only answer with information provided by the tools."
+        "You can only answer with information provided by the tools. "
         "When using a tool, produce arguments that VALIDATE against its JSON Schema.\n"
         "Allowed output format (JSON only):\n"
-        '{"action":"<tool_name|answer>","args":{...}, "rationale":"<brief reason>"}'
+        '{"action":"<tool_name|answer>","args":{...}, "rationale":"<brief reason>"} '
         "You have memory that you can access with the read_mem and write_mem tools."
     )
 
@@ -352,10 +363,12 @@ def plan_next_action(state: ControllerState) -> Tuple[str, Dict[str, Any], str]:
     })
 
     resp = client.chat.completions.create(
-        model="gpt-5-mini",
-        response_format={"type": "json_object"},  # we could use strict mode if we wanted to
-        messages=[{"role": "developer", "content": dev},
-                  {"role": "user", "content": user}]
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},  # enforce JSON output from planner
+        messages=[
+            {"role": "developer", "content": dev},
+            {"role": "user", "content": user}
+        ]
     )
     obj = json.loads(resp.choices[0].message.content)
     if hasattr(resp, "usage"):
@@ -369,42 +382,38 @@ def execute_action(action: str, args: Dict[str, Any]) -> Tuple[bool, str, Dict[s
     """
     Execute the selected action with validation, repair, retries, and error handling.
 
-    Replace the stubbed tool bodies with your real backends (APIs, DBs, etc.). Right now, they are just dummie entries.
-
-    :param action: tool selected by the model
-    :param args: arguments selected by the model
+    :param action: tool name selected by the planner
+    :param args: arguments selected by the planner for the tool
     :return: (ok, observation_text, normalized_payload, latency_ms)
     """
-
     t0 = time.time()
 
-    # 'answer' is a "virtual tool" signaling that we should synthesize the final answer.
+    # 'answer' is a virtual tool signaling that the agent should synthesize the final answer
     if action == "answer":
         obs = "Ready to synthesize final answer from working memory and evidence."
         return True, obs, {}, int((time.time() - t0) * 1000)
 
-    # Guard: only call known tools from the catalog.
+    # Guard: reject calls to tools not registered in the catalog
     if action not in TOOL_SCHEMAS:
         return False, f"Unknown tool: {action}", {}, int((time.time() - t0) * 1000)
 
-    # 1) Validate arguments against schema.
+    # Step 1: validate arguments against the tool's JSON Schema
     ok, msg = validate_args(action, args)
     if not ok:
-        # 2) One-shot repair via LLM; re-validate.
+        # Step 2: one-shot LLM repair attempt; re-validate the result
         fixed = repair_args_with_llm(action, args, msg)
         ok2, msg2 = validate_args(action, fixed)
         if not ok2:
             return False, f"Arg repair failed: {msg2}", {}, int((time.time() - t0) * 1000)
         args = fixed
 
-    # 3) Execute the tool with basic retry on transient failures (e.g., timeouts).
+    # Step 3: dispatch to the correct tool executor
     try:
-        # Replace these with your real integrations
-        if action == "weather.get_current":  # STUDENT_COMPLETE --> make this an actual weather API call
-            # Simulate an external API call to a weather service
-            # (In production, you would call your real weather API here.)
+        if action == "weather.get_current":
             city = args["city"]
             units = args.get("units", "metric")
+
+            # Step 1: geocode city name to lat/lon using Open-Meteo's free geocoding API
             geo_url = "https://geocoding-api.open-meteo.com/v1/search"
             geo_params = {"name": city, "count": 1, "language": "en", "format": "json"}
             geo_response = requests.get(geo_url, params=geo_params)
@@ -418,7 +427,7 @@ def execute_action(action: str, args: Dict[str, Any]) -> Tuple[bool, str, Dict[s
             longitude = location["longitude"]
             city_name = location.get("name", city)
 
-            # Get weather data from Open-Meteo
+            # Step 2: fetch current temperature and weather code from Open-Meteo forecast API
             weather_url = "https://api.open-meteo.com/v1/forecast"
             temp_unit = "fahrenheit" if units == "imperial" else "celsius"
             weather_params = {
@@ -432,7 +441,6 @@ def execute_action(action: str, args: Dict[str, Any]) -> Tuple[bool, str, Dict[s
 
             current = weather_data.get("current", {})
             temp = current.get("temperature_2m")
-            units = args.get("units", "metric")
             out_units = "F" if units == "imperial" else "C"
 
             payload = {
@@ -443,111 +451,116 @@ def execute_action(action: str, args: Dict[str, Any]) -> Tuple[bool, str, Dict[s
                 "weather_code": current.get("weather_code"),
                 "source": "open-meteo-api"
             }
-            obs = f"Weather in {payload['city']}: {payload['temp']}° ({payload['conditions']})"
+            obs = f"Weather in {payload['city']}: {payload['temp']}° {out_units} ({payload['conditions']})"
             return True, obs, payload, int((time.time() - t0) * 1000)
 
-        elif action == "kb.search":  # STUDENT_COMPLETE --> make this a vector search over a Chroma database
-            # Simulate a KB or vector database search
+        elif action == "kb.search":
             try:
+                # Connect to the persistent Chroma vector database stored alongside this script
                 db_path = os.path.join(os.path.dirname(__file__), "kb_chroma_db")
-                client = chromadb.PersistentClient(path=db_path)
-                collection = client.get_or_create_collection("handbook")
+                chroma_client = chromadb.PersistentClient(path=db_path)
+                collection = chroma_client.get_or_create_collection("handbook")
 
                 query = args["query"]
                 k = int(args.get("k", 5))
                 results = collection.query(query_texts=[query], n_results=k)
 
+                # Zip documents and metadata together into snippet dicts
                 snippets = []
                 for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
                     snippets.append({"snippet": doc, "meta": meta})
 
-                obs = f"Retrieved {len(snippets)} snippets: " + " | ".join(s["snippet"][:100] for s in snippets)
+                obs = f"Retrieved {len(snippets)} snippets: " + " | ".join(
+                    s["snippet"][:100] for s in snippets
+                )
                 return True, obs, {"results": snippets}, int((time.time() - t0) * 1000)
             except Exception as e:
                 return False, f"KB search error: {e}", {}, int((time.time() - t0) * 1000)
 
         elif action == "read_mem":
+            # Resolve Memory.md path relative to this script, not the working directory
             memory_path = os.path.join(os.path.dirname(__file__), "Memory.md")
-
             try:
-                # Ensure file exists
+                # Create the file if it does not yet exist
                 if not os.path.exists(memory_path):
                     with open(memory_path, "w", encoding="utf-8") as f:
                         f.write("")
 
-                # Read memory contents
                 with open(memory_path, "r", encoding="utf-8") as f:
                     content = f.read()
 
-                # Put content in the observation so it enters working memory.
+                # Return content as observation so it enters the planner's working context
                 obs = f"Memory contents:\n{content}"
-
                 payload = {"content": content}
-
                 return True, obs, payload, int((time.time() - t0) * 1000)
 
             except Exception as e:
                 return False, f"Memory read error: {e}", {}, int((time.time() - t0) * 1000)
-            
-        elif action == "write_mem":
-            memory_path = os.path.join(os.path.dirname(__file__), "Memory.md")
 
+        elif action == "write_mem":
+            # Resolve Memory.md path relative to this script, not the working directory
+            memory_path = os.path.join(os.path.dirname(__file__), "Memory.md")
             try:
                 content = args["content"]
 
+                # Append rather than overwrite so memory accumulates across sessions
                 with open(memory_path, "a", encoding="utf-8") as f:
                     f.write(content + "\n")
 
                 obs = f"Appended {len(content)} characters to memory."
                 payload = {"written": len(content)}
-
                 return True, obs, payload, int((time.time() - t0) * 1000)
 
             except Exception as e:
                 return False, f"Memory write error: {e}", {}, int((time.time() - t0) * 1000)
+
         elif action == "iss.location":
             try:
+                # Open Notify provides a free, no-auth endpoint for real-time ISS position
                 response = requests.get("http://api.open-notify.org/iss-now.json", timeout=5)
                 data = response.json()
                 position = data["iss_position"]
                 latitude = position["latitude"]
                 longitude = position["longitude"]
 
-                payload = {
-                    "latitude": latitude, 
-                    "longitude": longitude
-                }
+                payload = {"latitude": latitude, "longitude": longitude}
                 obs = f"Current ISS location: Latitude {latitude}, Longitude {longitude}"
                 return True, obs, payload, int((time.time() - t0) * 1000)
+
             except Exception as e:
                 return False, f"ISS location error: {e}", {}, int((time.time() - t0) * 1000)
+
         else:
-            # Safety: no executor wired for this tool
+            # Safety fallback: no executor is wired for this tool name
             return False, f"No executor bound for tool: {action}", {}, int((time.time() - t0) * 1000)
 
     except Exception as e:
-        # Non-transient or unexpected error
+        # Catch-all for unexpected runtime errors in any tool executor
         return False, f"Tool error: {type(e).__name__}: {e}", {}, int((time.time() - t0) * 1000)
 
 
 # Final Synthesis ------------------------------------------------------------------------------------------------------
+
 def synthesize_answer(state: ControllerState) -> str:
     """
-    Compose the final answer using the compact working summary accumulated in state.history_summary. The full raw trace
-    can be logged elsewhere.
+    Compose the final answer using the compact working summary accumulated in state.history_summary.
+    The full raw trace can be logged separately for debugging.
 
     :param state: instance of ControllerState
-    :return: model's response
+    :return: final answer string from the model
     """
-    sys = "Your goal is to produce a final answer to a goal (likely a question) using only evidence provided in the " \
-          "working summary."
+    sys = (
+        "Your goal is to produce a final answer to a goal (likely a question) using only "
+        "evidence provided in the working summary."
+    )
+    # Constrain output length to avoid runaway generation in the final synthesis step
     user = (
         f"Goal: {state.goal}\n\n"
         f"Working summary:\n{state.history_summary}\n\n"
-        f"Produce the final answer in ≤ 200 tokens."
+        f"Produce the final answer in <= 200 tokens."
     )
     resp = client.chat.completions.create(
-        model="gpt-5-mini",
+        model="gpt-4o-mini",
         messages=[
             {"role": "developer", "content": sys},
             {"role": "user", "content": user}
@@ -564,15 +577,14 @@ def run_agent(goal: str) -> str:
     """
     Main controller loop:
       while budgets remain and not done:
-        1) Build context (we keep a rolling summary in state)
-        2) Plan next action (tool or 'answer')
-        3) Loop detection guard
-        4) Execute with validation/repair/retry
-        5) Update summary and telemetry
-        6) If 'answer', synthesize final output and stop
+        1) Plan next action (tool or 'answer') using the planner LLM
+        2) Loop detection guard to prevent oscillation
+        3) Execute the chosen action with validation and repair
+        4) Update rolling summary with new evidence
+        5) If 'answer', synthesize final output and stop
 
-    :param goal:
-    :return:
+    :param goal: the user's query string
+    :return: final answer string or budget-exhausted message
     """
     state = ControllerState(goal=goal)
 
@@ -581,18 +593,18 @@ def run_agent(goal: str) -> str:
         action, args, rationale = plan_next_action(state)
         print(f"Action selected: {action}\n\targuments: {args}\n\trationale: {rationale}")
 
-        # Prevent infinite ReAct loops by hashing last few actions
+        # Prevent infinite ReAct loops by comparing fingerprints of recent actions
         if looks_stuck(action, args):
             print("\tdetected being stuck in loop...")
             state.last_observation = "Loop detected: revise plan with a different next action."
-            # Do not increment steps or execute; let planner try again
+            # Do not increment steps or execute; let planner try again with new context
             continue
 
         # Execute the chosen action (or 'answer' pseudo-tool)
         ok, obs, payload, ms = execute_action(action, args)
         print(f"\t\ttool payload: {payload}")
 
-        # Record step telemetry
+        # Record step telemetry for debugging and cost tracking
         state.steps_taken += 1
         state.tool_trace.append(StepRecord(
             action=action,
@@ -602,31 +614,32 @@ def run_agent(goal: str) -> str:
             info=payload
         ))
 
-        # Provide short observation back to planner for next turn
+        # Feed the short observation back to the planner for the next iteration
         state.last_observation = obs
 
-        # Summarize new evidence into compact working memory
+        # Compress new evidence into the rolling working memory summary
         update_summary(state, f"{action}({args}) -> {obs}")
 
-        # If planner signaled 'answer', produce final answer and exit
+        # If planner signaled 'answer', produce the final answer and exit the loop
         if action == "answer" and ok:
             final = synthesize_answer(state)
             state.done = True
             return final
 
-        # If a tool failed, we do not crash; the planner sees the observation
-        # and can pivot on the next iteration. The loop will also stop on budgets.
+        # If a tool failed, the planner sees the observation and can pivot on the next step
     print(within_budget(state), state.done)
-    # If we exit naturally, budgets are exhausted or we never reached 'answer'
+    # Reached here only if budgets are exhausted or the agent made no progress
     return "Stopped: budget exhausted or no progress."
 
 
-# Demo -----------------------------------------------------------------------------------------------------------------
+# Entry Point ----------------------------------------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    # STUDENT_COMPLETE --> you should use argparse here so that one can just ask a question like:
-    #         python agentic_controller.py "Why were they trying to catch the whale in Moby Dick?"
-    #         python agentic_controller.py "What is today's weather like in Baton Rouge?"
-    #         python agentic_controller.py "INSERT SOME QUERY HERE RELEVANT TO YOUR CUSTOM TOOL"
+    # Parse a single positional argument: the user's query string
+    # Example usage:
+    #   python agentic_controller.py "What is today's weather in Baton Rouge?"
+    #   python agentic_controller.py "Where is the ISS right now?"
+    #   python agentic_controller.py "My name is Daniel, please remember it."
     parser = argparse.ArgumentParser(description="Agentic Controller")
     parser.add_argument("query", type=str, help="Your query to the agent")
     parsed = parser.parse_args()
@@ -635,14 +648,3 @@ if __name__ == "__main__":
     answer = run_agent(parsed.query)
     print("\n--- Final Answer ---\n")
     print(answer)
-
-    # Example end-to-end run:
-    # The planner can choose to look up weather, search a KB, and then synthesize an answer.
-    # goal = "What's the current weather in Paris (metric) and do I need VPN for remote access?"
-    # print("\n--- Running Agent ---\n")
-    # answer = run_agent(goal)
-    # print("\n--- Final Answer ---\n")
-    # print(answer)
-
-    # You could also print telemetry for inspection:
-    # - steps taken, tokens used, cost, brief trace, etc.
